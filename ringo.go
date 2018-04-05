@@ -12,8 +12,10 @@ type RingBuffer struct {
 	readLock           *sync.Cond
 	writeLock          *sync.Cond
 	bufLock            *sync.Mutex
-	desiredWriteLength int
-	desiredWriteLock   *sync.Mutex
+	pendingWriteLength int
+	pendingDiffLock    *sync.RWMutex
+	pendingWriteLock   *sync.Mutex
+	doneLock           *sync.RWMutex
 	diff               int
 	maxSize            int
 	done               bool
@@ -26,8 +28,10 @@ func NewBuffer(size int) *RingBuffer {
 		readLock:           &sync.Cond{L: &sync.Mutex{}},
 		writeLock:          &sync.Cond{L: &sync.Mutex{}},
 		bufLock:            &sync.Mutex{},
-		desiredWriteLength: 0,
-		desiredWriteLock:   &sync.Mutex{},
+		pendingWriteLength: 0,
+		pendingDiffLock:    &sync.RWMutex{},
+		pendingWriteLock:   &sync.Mutex{},
+		doneLock:           &sync.RWMutex{},
 		diff:               0,
 		maxSize:            size,
 		done:               false,
@@ -36,37 +40,43 @@ func NewBuffer(size int) *RingBuffer {
 
 //Write writes the given slice `p` into the calling *RingBuffer and returns the number of bytes written, and an error if any.  If the length of `p` is greater than the size of *RingBuffer, it returns an error.
 func (this *RingBuffer) Write(p []byte) (int, error) {
+	this.doneLock.RLock()
 	if this.done {
+		this.doneLock.RUnlock()
 		return 0, errors.New("This buffer has been marked as done.  Use Reset() to reopen the buffer for writing")
 	}
+	this.doneLock.RUnlock()
 
 	if len(p) > this.maxSize {
 		return -1, errors.New("Size to write exceeds the buffer size")
 	}
 
 	this.writeLock.L.Lock()
-	this.desiredWriteLock.Lock()
-	this.desiredWriteLength = len(p)
-	this.desiredWriteLock.Unlock()
+	this.pendingDiffLock.Lock()
+	this.pendingWriteLength = len(p)
+	this.pendingDiffLock.Unlock()
 
+	this.pendingWriteLock.Lock()
 	for !this.isSafeToWrite(len(p)) {
 		this.writeLock.Wait()
 	}
 
+	this.bufLock.Lock()
 	n, err := this.Buffer.Write(p)
 	if err != nil {
 		this.writeLock.L.Unlock()
+		this.pendingWriteLock.Unlock()
 		return n, err
 	}
+	this.diff = this.diff + n
+	this.pendingWriteLock.Unlock()
 	this.writeLock.L.Unlock()
 
-	this.bufLock.Lock()
-	this.diff = this.diff + n
 	this.bufLock.Unlock()
 
-	this.desiredWriteLock.Lock()
-	this.desiredWriteLength = 0
-	this.desiredWriteLock.Unlock()
+	this.pendingDiffLock.Lock()
+	this.pendingWriteLength = 0
+	this.pendingDiffLock.Unlock()
 	this.readLock.Signal()
 
 	return n, err
@@ -79,20 +89,20 @@ func (this *RingBuffer) Read(p []byte) (int, error) {
 	for !this.isSafeToRead(len(p)) {
 		this.readLock.Wait()
 	}
+
+	this.bufLock.Lock()
 	n, err := this.Buffer.Read(p)
 	if err != nil {
 		return n, err
 	}
+	this.diff = this.diff - n
 	this.readLock.L.Unlock()
 
-	this.bufLock.Lock()
-	this.diff = this.diff - n
-
-	this.desiredWriteLock.Lock()
-	if this.maxSize-this.diff >= this.desiredWriteLength {
+	this.pendingDiffLock.RLock()
+	if this.maxSize-this.diff >= this.pendingWriteLength {
 		this.writeLock.Signal()
 	}
-	this.desiredWriteLock.Unlock()
+	this.pendingDiffLock.RUnlock()
 	this.bufLock.Unlock()
 
 	return n, err
@@ -100,6 +110,8 @@ func (this *RingBuffer) Read(p []byte) (int, error) {
 
 //UnreadBytes returns the number of bytes that have yet to be read on the calling *RingBuffer
 func (this *RingBuffer) UnreadBytes() int {
+	this.pendingWriteLock.Lock()
+	defer this.pendingWriteLock.Unlock()
 	this.bufLock.Lock()
 	defer this.bufLock.Unlock()
 	return this.diff
@@ -121,6 +133,8 @@ func (this *RingBuffer) isSafeToWrite(len int) bool {
 func (this *RingBuffer) isSafeToRead(len int) bool {
 	this.bufLock.Lock()
 	defer this.bufLock.Unlock()
+	this.doneLock.RLock()
+	defer this.doneLock.RUnlock()
 	return this.done || this.diff >= len
 }
 
@@ -128,7 +142,9 @@ func (this *RingBuffer) isSafeToRead(len int) bool {
 func (this *RingBuffer) WriteIsComplete() {
 	this.bufLock.Lock()
 	defer this.bufLock.Unlock()
+	this.doneLock.Lock()
 	this.done = true
+	this.doneLock.Unlock()
 	this.readLock.Signal()
 }
 
@@ -137,5 +153,7 @@ func (this *RingBuffer) Reset() {
 	this.bufLock.Lock()
 	defer this.bufLock.Unlock()
 	this.diff = 0
+	this.doneLock.Lock()
 	this.done = false
+	this.doneLock.Unlock()
 }

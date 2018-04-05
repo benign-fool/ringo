@@ -48,9 +48,9 @@ func (this *CreationTestSuite) TestRingBufferCreation() {
 	assert.Equal(ringBuf.UnreadBytes(), 0)
 }
 
-// func TestRingBufferCreation(t *testing.T) {
-// 	suite.Run(t, new(CreationTestSuite))
-// }
+func TestRingBufferCreation(t *testing.T) {
+	suite.Run(t, new(CreationTestSuite))
+}
 
 func (this *WriteTestSuite) SetupTest() {
 	this.size = 1500
@@ -161,9 +161,9 @@ func (this *SafetyTestSuite) TestIsSafeToRead() {
 	assert.Equal(t, unsafeIsSafeAfterDone, true)
 }
 
-// func TestRingBufferSafety(t *testing.T) {
-// 	suite.Run(t, new(SafetyTestSuite))
-// }
+func TestRingBufferSafety(t *testing.T) {
+	suite.Run(t, new(SafetyTestSuite))
+}
 
 func (this *ConcurrencyTestSuite) SetupTest() {
 	this.size = 150
@@ -258,23 +258,21 @@ func TestDoneCalledWithPendingWrite(t *testing.T) {
 	assert.Nil(t, err, "No write error should have been thrown")
 	assert.Equal(t, 75, n, "Should have written 75 bytes to buffer")
 
+	goFuncStarted := make(chan interface{})
 	go func() {
 		pendingWriteString := makeString(100)
+		goFuncStarted <- true
 		n, err := ringBuf.Write(pendingWriteString)
 		assert.Nil(t, err, "A pending write when WriteIsComplete is called should not cause an error")
 		assert.Equal(t, 100, n, "Should still write if a write is pending when WriteIsComplete is called")
 	}()
 
-	goFuncStartTimer := time.NewTimer(50 * time.Millisecond)
-	<-goFuncStartTimer.C
+	<-goFuncStarted
 	ringBuf.WriteIsComplete()
 	readSlice := make([]byte, 25)
 	readBytes, err := ringBuf.Read(readSlice)
 	assert.Nil(t, err, "Shouldn't cause an error to read from a Done buffer")
 	assert.Equal(t, 25, readBytes, "Reading from a Done buffer should not read from the pending write")
-	//Sometimes I wonder: "If I have to use a timer wait in a test, is it really concurrency safe?"
-	goFuncEndTimer := time.NewTimer(50 * time.Millisecond)
-	<-goFuncEndTimer.C
 
 	unreadBytes := ringBuf.UnreadBytes()
 	assert.Equal(t, 150, unreadBytes, "Should have loaded the pending write into the buffer")
